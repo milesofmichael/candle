@@ -844,3 +844,110 @@ impl T5ForConditionalGeneration {
         self.decoder.reorder_kv_cache(beam_idx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use candle::{Device, Tensor};
+
+    // Tests verify the index_select operation that reorder_kv_cache uses
+    // internally. We test on raw tensors with the same shapes and semantics
+    // as real KV cache tensors (batch, n_heads, seq_len, d_kv).
+    // We can't construct T5Attention without loading real quantized weights,
+    // so we test the underlying tensor operation directly.
+
+    #[test]
+    fn test_reorder_kv_cache_identity() {
+        // Reordering with identity indices [0, 1, 2, 3] should be a no-op.
+        let device = Device::Cpu;
+        let batch = 4;
+        let n_heads = 2;
+        let seq_len = 3;
+        let d_kv = 4;
+
+        let k_data: Vec<f32> = (0..(batch * n_heads * seq_len * d_kv) as u32)
+            .map(|x| x as f32)
+            .collect();
+        let k = Tensor::from_vec(k_data, (batch, n_heads, seq_len, d_kv), &device).unwrap();
+
+        let beam_idx = Tensor::new(&[0u32, 1, 2, 3], &device).unwrap();
+        let k_reordered = k.index_select(&beam_idx, 0).unwrap();
+
+        let orig: Vec<f32> = k.flatten_all().unwrap().to_vec1().unwrap();
+        let reordered: Vec<f32> = k_reordered.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(orig, reordered);
+    }
+
+    #[test]
+    fn test_reorder_kv_cache_swap() {
+        // Swap beams: [1, 0, 3, 2] — beam 0 gets beam 1's cache, etc.
+        let device = Device::Cpu;
+        let batch = 4;
+        let n_heads = 1;
+        let seq_len = 1;
+        let d_kv = 2;
+
+        // Each beam has distinct values: beam 0 = [0,1], beam 1 = [2,3], etc.
+        let k_data: Vec<f32> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let k = Tensor::from_vec(k_data, (batch, n_heads, seq_len, d_kv), &device).unwrap();
+
+        let beam_idx = Tensor::new(&[1u32, 0, 3, 2], &device).unwrap();
+        let k_reordered = k.index_select(&beam_idx, 0).unwrap();
+
+        let result: Vec<f32> = k_reordered.flatten_all().unwrap().to_vec1().unwrap();
+        // Beam 0 now has beam 1's data, beam 1 has beam 0's, etc.
+        assert_eq!(result, vec![2.0, 3.0, 0.0, 1.0, 6.0, 7.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_reorder_kv_cache_duplicate() {
+        // Duplicate best beam: [0, 0, 0, 0] — all beams get beam 0's cache.
+        let device = Device::Cpu;
+        let batch = 4;
+        let n_heads = 1;
+        let seq_len = 1;
+        let d_kv = 2;
+
+        let k_data: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+        let k = Tensor::from_vec(k_data, (batch, n_heads, seq_len, d_kv), &device).unwrap();
+
+        let beam_idx = Tensor::new(&[0u32, 0, 0, 0], &device).unwrap();
+        let k_reordered = k.index_select(&beam_idx, 0).unwrap();
+
+        let result: Vec<f32> = k_reordered.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(result, vec![10.0, 20.0, 10.0, 20.0, 10.0, 20.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn test_reorder_preserves_shape() {
+        // Verify that reordering preserves tensor dimensions.
+        let device = Device::Cpu;
+        let batch = 3;
+        let n_heads = 4;
+        let seq_len = 5;
+        let d_kv = 8;
+
+        let k_data: Vec<f32> = (0..(batch * n_heads * seq_len * d_kv))
+            .map(|x| x as f32)
+            .collect();
+        let k = Tensor::from_vec(k_data, (batch, n_heads, seq_len, d_kv), &device).unwrap();
+
+        let beam_idx = Tensor::new(&[2u32, 0, 1], &device).unwrap();
+        let k_reordered = k.index_select(&beam_idx, 0).unwrap();
+
+        assert_eq!(k_reordered.dims(), &[batch, n_heads, seq_len, d_kv]);
+    }
+
+    #[test]
+    fn test_reorder_single_beam() {
+        // Single beam [0] — trivial case, should be identical.
+        let device = Device::Cpu;
+        let k = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &device).unwrap();
+
+        let beam_idx = Tensor::new(&[0u32], &device).unwrap();
+        let k_reordered = k.index_select(&beam_idx, 0).unwrap();
+
+        let orig: Vec<f32> = k.flatten_all().unwrap().to_vec1().unwrap();
+        let result: Vec<f32> = k_reordered.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(orig, result);
+    }
+}
