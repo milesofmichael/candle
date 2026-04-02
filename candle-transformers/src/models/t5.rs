@@ -579,6 +579,16 @@ impl T5Attention {
     fn clear_kv_cache(&mut self) {
         self.kv_cache = None
     }
+
+    fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        if let Some((ref k, ref v)) = self.kv_cache {
+            self.kv_cache = Some((
+                k.index_select(beam_idx, 0)?,
+                v.index_select(beam_idx, 0)?,
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -617,6 +627,10 @@ impl T5LayerSelfAttention {
 
     fn clear_kv_cache(&mut self) {
         self.self_attention.clear_kv_cache()
+    }
+
+    fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        self.self_attention.reorder_kv_cache(beam_idx)
     }
 }
 
@@ -659,6 +673,10 @@ impl T5LayerCrossAttention {
 
     fn clear_kv_cache(&mut self) {
         self.cross_attention.clear_kv_cache()
+    }
+
+    fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        self.cross_attention.reorder_kv_cache(beam_idx)
     }
 }
 
@@ -731,6 +749,14 @@ impl T5Block {
         self.self_attn.clear_kv_cache();
         self.cross_attn.iter_mut().for_each(|c| c.clear_kv_cache());
     }
+
+    fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        self.self_attn.reorder_kv_cache(beam_idx)?;
+        for c in self.cross_attn.iter_mut() {
+            c.reorder_kv_cache(beam_idx)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -793,6 +819,13 @@ impl T5Stack {
 
     fn clear_kv_cache(&mut self) {
         self.block.iter_mut().for_each(|b| b.clear_kv_cache())
+    }
+
+    fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        for block in self.block.iter_mut() {
+            block.reorder_kv_cache(beam_idx)?;
+        }
+        Ok(())
     }
 }
 
@@ -949,5 +982,12 @@ impl T5ForConditionalGeneration {
     pub fn clear_kv_cache(&mut self) {
         self.encoder.clear_kv_cache();
         self.decoder.clear_kv_cache();
+    }
+
+    /// Reorder the decoder KV cache to match new beam indices during beam
+    /// search. `beam_idx` is a 1D tensor of shape (beam_size,) mapping each
+    /// new beam position to its source in the current cache batch dimension.
+    pub fn reorder_kv_cache(&mut self, beam_idx: &Tensor) -> Result<()> {
+        self.decoder.reorder_kv_cache(beam_idx)
     }
 }
